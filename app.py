@@ -5,15 +5,104 @@ import re
 import pandas as pd
 import streamlit as st
 import rules
-from data_sources import load_live_data, search_by_regno, search_by_phone, PHONE_COLUMNS
 
 st.set_page_config(page_title="Registration Lookup", layout="wide", initial_sidebar_state="collapsed")
+
+PHONE_COLUMNS = ["mobile_no", "father_mobile_no", "mother_mobile_no", "class_recorded_mobile_no", "whatsapp_number"]
 
 BG_COLOR = "#F4F7FB"
 CARD_BG = "#FFFFFF"
 ACCENT = "#93C5FD"
 TEXT_MAIN = "#334155"
 BORDER = "#E2E8F0"
+
+
+def clean_regno(value) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    text = re.sub(r"\.0+$", "", text)
+    return re.sub(r"\D", "", text)
+
+
+@st.cache_data(show_spinner=False, max_entries=1)
+def load_live_data(sync_key: str) -> pd.DataFrame:
+    cfg = dict(st.secrets.get("sheet", {}))
+    url = cfg.get("csv_url")
+    if not url:
+        raise ValueError("CSV URL missing in Secrets.")
+    if "pubhtml" in url:
+        raise ValueError("csv_url points to a web page (pubhtml). Use the /pub?...&output=csv link.")
+
+    df = pd.read_csv(url, dtype=str, keep_default_na=False)
+    df.columns = [str(c).strip().casefold() for c in df.columns]
+
+    reg_col = next((c for c in ["regno", "reg_no", "registration no", "reg no"] if c in df.columns), None)
+    prog_col = next((c for c in ["all_program", "program", "program_name", "course"] if c in df.columns), None)
+    fee_col = next((c for c in ["fees_paid", "fee_paid", "fees", "fee"] if c in df.columns), None)
+    date_col = next((c for c in ["joining_date_timestamp", "joining_date", "date", "call date"] if c in df.columns), None)
+
+    if reg_col is None:
+        raise ValueError("regno column not found. Columns seen: " + str(list(df.columns)))
+
+    df["_regno_clean"] = df[reg_col].apply(clean_regno)
+    df["_program_clean"] = df[prog_col].astype(str).str.strip() if prog_col else "Unknown"
+    df["_fee_clean"] = df[fee_col].apply(rules.parse_fee) if fee_col else None
+
+    if date_col:
+        raw = df[date_col].astype(str).str.strip()
+        parsed = pd.to_datetime(raw, errors="coerce", format="%Y-%m-%d %H:%M:%S")
+        if parsed.isna().any():
+            fallback = pd.to_datetime(raw, errors="coerce", format="mixed", dayfirst=False)
+            parsed = parsed.fillna(fallback)
+        df["_date_clean"] = parsed.dt.date
+    else:
+        df["_date_clean"] = None
+
+    for col in PHONE_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().str.lower()
+
+    return df.reset_index(drop=True)
+
+
+def search_by_regno(df, regno):
+    key = clean_regno(regno)
+    if not key:
+        return pd.DataFrame()
+    return df[df["_regno_clean"] == key]
+
+
+def search_by_phone(df, phone_hash):
+    target = str(phone_hash).strip().lower()
+    valid_cols = [c for c in PHONE_COLUMNS if c in df.columns]
+    if not valid_cols:
+        return pd.DataFrame()
+    mask = pd.Series(False, index=df.index)
+    for col in valid_cols:
+        mask = mask | (df[col] == target)
+    return df[mask]
+
+
+def mask_mobile(val):
+    if val is None or not str(val).strip():
+        return "-"
+    s = str(val).strip()
+    if len(s) == 32 and re.fullmatch(r"[a-fA-F0-9]{32}", s):
+        return "[Secured Hash]"
+    cleaned = re.sub(r"\D", "", s)
+    if len(cleaned) >= 10:
+        return cleaned[:2] + "xxxx" + cleaned[-4:]
+    return s
+
+
+def get_ist_sync_key():
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.datetime.now(ist)
+    if now.hour < 11:
+        return (now - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    return now.strftime("%Y-%m-%d")
+
 
 st.markdown(f"""
 <style>
@@ -37,20 +126,11 @@ st.markdown(f"""
 
 st.markdown('<div class="header-box"><h1>Registration Lookup and Fee Verification</h1></div>', unsafe_allow_html=True)
 
-
-def get_ist_sync_key():
-    ist = pytz.timezone('Asia/Kolkata')
-    now = datetime.datetime.now(ist)
-    if now.hour < 11:
-        return (now - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-    return now.strftime('%Y-%m-%d')
-
-
 with st.spinner("Loading 30-Day Database..."):
     try:
         df = load_live_data(get_ist_sync_key())
     except Exception as exc:
-        st.error(f"System Offline: ({exc})")
+        st.error("System Offline: " + str(exc))
         st.stop()
 
 st.markdown('<div class="control-panel">', unsafe_allow_html=True)
@@ -75,30 +155,17 @@ search_query = st.text_input("Search", placeholder="Enter Reg No or 10-digit Mob
 st.markdown('</div>', unsafe_allow_html=True)
 
 
-def mask_mobile(val):
-    if pd.isna(val) or not str(val).strip():
-        return "-"
-    s = str(val).strip()
-    if len(s) == 32 and re.fullmatch(r"[a-fA-F0-9]{32}", s):
-        return "[Secured Hash]"
-    cleaned = re.sub(r"\D", "", s)
-    if len(cleaned) >= 10:
-        return cleaned[:2] + "xxxx" + cleaned[-4:]
-    return s
-
-
 def render_record_card(record):
     program_val = record.get("_program_clean", "-")
     fee_val = record.get("_fee_clean", None)
     verdict = rules.evaluate(program_val, fee_val)
-    fee_display = f"Rs {fee_val:,.2f}" if pd.notna(fee_val) else "-"
-
+    fee_display = "Rs {:,.2f}".format(fee_val) if pd.notna(fee_val) else "-"
     phones = {col: mask_mobile(record.get(col, "-")) for col in PHONE_COLUMNS}
 
-    st.markdown(f"""
-    <div class="verdict-card {verdict.tone}">
-      <h3>{verdict.headline}</h3>
-      <p>{verdict.detail}</p>
+    html = """
+    <div class="verdict-card {tone}">
+      <h3>{headline}</h3>
+      <p>{detail}</p>
       <div class="pastel-table-wrapper">
         <table class="pastel-grid">
           <thead>
@@ -109,18 +176,31 @@ def render_record_card(record):
           </thead>
           <tbody>
             <tr>
-              <td><strong>{record.get('_regno_clean', '-')}</strong></td>
-              <td>{program_val}</td>
-              <td>{fee_display}</td>
-              <td>{record.get('_date_clean', '-')}</td>
-              <td>{phones.get('mobile_no')}</td><td>{phones.get('whatsapp_number')}</td>
-              <td>{phones.get('father_mobile_no')}</td><td>{phones.get('mother_mobile_no')}</td><td>{phones.get('class_recorded_mobile_no')}</td>
+              <td><strong>{regno}</strong></td>
+              <td>{program}</td>
+              <td>{fee}</td>
+              <td>{date}</td>
+              <td>{m1}</td><td>{m2}</td><td>{m3}</td><td>{m4}</td><td>{m5}</td>
             </tr>
           </tbody>
         </table>
       </div>
     </div>
-    """, unsafe_allow_html=True)
+    """.format(
+        tone=verdict.tone,
+        headline=verdict.headline,
+        detail=verdict.detail,
+        regno=record.get("_regno_clean", "-"),
+        program=program_val,
+        fee=fee_display,
+        date=record.get("_date_clean", "-"),
+        m1=phones.get("mobile_no"),
+        m2=phones.get("whatsapp_number"),
+        m3=phones.get("father_mobile_no"),
+        m4=phones.get("mother_mobile_no"),
+        m5=phones.get("class_recorded_mobile_no"),
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 if search_query.strip():
@@ -131,9 +211,8 @@ if search_query.strip():
     if search_type == "Registration Number":
         results = search_by_regno(df, search_query)
     else:
-        raw_phone = search_query.strip()
-        phone_hash = hashlib.md5(raw_phone.encode()).hexdigest()
-        st.caption(f"Generated Masked Number: `{phone_hash}`")
+        phone_hash = hashlib.md5(search_query.strip().encode()).hexdigest()
+        st.caption("Generated Masked Number: " + phone_hash)
         results = search_by_phone(df, phone_hash)
 
     raw_hits = len(results)
@@ -145,17 +224,17 @@ if search_query.strip():
         if selected_programs:
             results = results[results["_program_clean"].isin(selected_programs)]
 
-    with st.expander("Diagnostics (delete once fixed)"):
+    with st.expander("Diagnostics"):
         st.write("Rows loaded from sheet:", len(df))
         st.write("Columns detected:", list(df.columns))
-        st.write("Earliest date in data:", str(valid_dates.min()) if not valid_dates.empty else "NONE")
-        st.write("Latest date in data:", str(valid_dates.max()) if not valid_dates.empty else "NONE")
+        st.write("Earliest date:", str(valid_dates.min()) if not valid_dates.empty else "NONE")
+        st.write("Latest date:", str(valid_dates.max()) if not valid_dates.empty else "NONE")
         st.write("Rows with unreadable dates:", int(df["_date_clean"].isna().sum()))
-        st.write("Matches BEFORE date/program filter:", raw_hits)
-        st.write("Matches AFTER date/program filter:", len(results))
+        st.write("Matches BEFORE filters:", raw_hits)
+        st.write("Matches AFTER filters:", len(results))
 
     if results.empty:
-        st.markdown('<div class="verdict-card miss"><h3>No results found</h3><p>Ensure the number is correct and falls within the selected 30-Day Date Range and Program.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="verdict-card miss"><h3>No results found</h3><p>Ensure the number is correct and falls within the selected date range and program.</p></div>', unsafe_allow_html=True)
     else:
         for _, row in results.iterrows():
             render_record_card(row.to_dict())
