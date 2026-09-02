@@ -19,8 +19,15 @@ def load_live_data(sync_key: str) -> pd.DataFrame:
     if not url:
         raise ValueError("CSV URL missing.")
 
-    # Load the lightweight 5MB D_30 payload
-    df = pd.read_csv(url, dtype=str, keep_default_na=False)
+    # THE FIX: Added on_bad_lines='skip' to bypass stray commas in user data
+    df = pd.read_csv(
+        url, 
+        dtype=str, 
+        keep_default_na=False, 
+        on_bad_lines='skip',
+        engine='python' # Uses the more forgiving Python parser
+    )
+    
     df.columns = [str(c).strip().casefold() for c in df.columns]
 
     # Map core columns
