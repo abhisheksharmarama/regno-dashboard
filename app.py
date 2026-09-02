@@ -5,7 +5,7 @@ import re
 import pandas as pd
 import streamlit as st
 import rules
-from data_sources import sync_sqlite_db, search_regno, search_phone, get_unique_programs, PHONE_COLUMNS
+from data_sources import sync_sqlite_db, search_regno, search_phone, get_unique_programs, PHONE_COLS
 
 st.set_page_config(
     page_title="Registration Lookup",
