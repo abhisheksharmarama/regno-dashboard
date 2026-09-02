@@ -60,7 +60,6 @@ def sync_sqlite_db(sync_key: str):
     return True
 
 def search_regno(regno: str) -> pd.DataFrame:
-    """Queries the hard drive database for a Reg No."""
     conn = sqlite3.connect(DB_FILE)
     clean_reg = clean_regno(regno)
     df = pd.read_sql("SELECT * FROM regs WHERE _regno_clean = ?", conn, params=(clean_reg,))
@@ -68,10 +67,7 @@ def search_regno(regno: str) -> pd.DataFrame:
     return df
 
 def search_phone(phone_hash: str) -> pd.DataFrame:
-    """Queries the hard drive database for a Phone Hash."""
     conn = sqlite3.connect(DB_FILE)
-    
-    # Dynamically build a query to check all phone columns
     df_cols = pd.read_sql("PRAGMA table_info(regs)", conn)
     valid_cols = [c for c in PHONE_COLS if c in df_cols['name'].tolist()]
     
@@ -88,7 +84,6 @@ def search_phone(phone_hash: str) -> pd.DataFrame:
     return df
 
 def get_unique_programs() -> list:
-    """Instantly fetches dropdown options from the DB."""
     if not os.path.exists(DB_FILE):
         return []
     try:
