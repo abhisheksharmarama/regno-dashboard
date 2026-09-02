@@ -8,8 +8,11 @@ PROGRAM_ALIASES = ["all_program", "program", "program_name", "course", "program 
 FEE_ALIASES = ["fees_paid", "fee_paid", "fees", "fee", "amount_paid", "paid_amount"]
 DATE_ALIASES = ["joining_date", "joining_date_timestamp", "admission_date", "date", "timestamp", "call date", "created_at"]
 
+# Phone columns to scan for the MD5 hash
+PHONE_COLUMNS = ["mobile_no", "father_mobile_no", "mother_mobile_no", "class_recorded_mobile_no", "whatsapp_number"]
+
 def clean_regno(value) -> str:
-    if value is None:
+    if value is None or pd.isna(value):
         return ""
     if isinstance(value, float) and value.is_integer():
         value = int(value)
@@ -24,7 +27,6 @@ def find_column(df: pd.DataFrame, aliases: list[str]) -> str | None:
             return lowered[alias]
     return None
 
-# Disabled default spinner; UI handles it now for a lag-free visual experience
 @st.cache_data(show_spinner=False)
 def load_live_data(sync_key: str) -> pd.DataFrame:
     cfg = dict(st.secrets.get("sheet", {}))
@@ -32,7 +34,6 @@ def load_live_data(sync_key: str) -> pd.DataFrame:
     if not url:
         raise ValueError("Google Sheet CSV URL is missing in Streamlit Secrets.")
 
-    # High-speed pyarrow engine parses massive files significantly faster
     df = pd.read_csv(url, dtype=str, keep_default_na=False, engine="pyarrow")
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -53,9 +54,16 @@ def load_live_data(sync_key: str) -> pd.DataFrame:
     df["_verdict_code"] = rules.evaluate_frame(df["_program_clean"], df[fee_col] if fee_col else pd.Series())
     df["_verdict_label"] = df["_verdict_code"].map(rules.LABELS)
 
+    # Clean phone columns to ensure accurate hash matching
+    for col in PHONE_COLUMNS:
+        actual_col = find_column(df, [col])
+        if actual_col:
+            df[actual_col] = df[actual_col].str.strip().str.lower()
+
     return df.set_index("_regno_clean", drop=False)
 
 def lookup_record(df: pd.DataFrame, regno: str):
+    """Finds a single registration by exact Reg No."""
     key = clean_regno(regno)
     if not key or key not in df.index:
         return None
@@ -63,3 +71,16 @@ def lookup_record(df: pd.DataFrame, regno: str):
     if isinstance(row, pd.DataFrame):
         row = row.iloc[0]
     return row
+
+def lookup_by_phone(df: pd.DataFrame, phone_hash: str) -> pd.DataFrame:
+    """Finds all records matching an MD5 hashed phone number."""
+    actual_phone_cols = [find_column(df, [c]) for c in PHONE_COLUMNS if find_column(df, [c])]
+    if not actual_phone_cols:
+        return pd.DataFrame()
+    
+    # Create a mask checking if the hash exists in ANY of the phone columns
+    mask = pd.Series(False, index=df.index)
+    for col in actual_phone_cols:
+        mask = mask | (df[col] == phone_hash)
+        
+    return df[mask]
