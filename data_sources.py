@@ -24,15 +24,16 @@ def find_column(df: pd.DataFrame, aliases: list[str]) -> str | None:
             return lowered[alias]
     return None
 
-# Notice the 'sync_key' parameter. When this changes at 1 AM IST, the cache resets.
-@st.cache_data(show_spinner="Syncing live with Google Sheets...")
+# Disabled default spinner; UI handles it now for a lag-free visual experience
+@st.cache_data(show_spinner=False)
 def load_live_data(sync_key: str) -> pd.DataFrame:
     cfg = dict(st.secrets.get("sheet", {}))
     url = cfg.get("csv_url")
     if not url:
         raise ValueError("Google Sheet CSV URL is missing in Streamlit Secrets.")
 
-    df = pd.read_csv(url, dtype=str, keep_default_na=False)
+    # High-speed pyarrow engine parses massive files significantly faster
+    df = pd.read_csv(url, dtype=str, keep_default_na=False, engine="pyarrow")
     df.columns = [str(c).strip() for c in df.columns]
 
     reg_col = find_column(df, REGNO_ALIASES) or df.columns[0]
