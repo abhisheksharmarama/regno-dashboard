@@ -9,7 +9,11 @@ from data_sources import load_live_data, search_by_regno, search_by_phone, PHONE
 
 st.set_page_config(page_title="Registration Lookup", layout="wide", initial_sidebar_state="collapsed")
 
-BG_COLOR, CARD_BG, ACCENT, TEXT_MAIN, TEXT_MUTED, BORDER = "#F4F7FB", "#FFFFFF", "#93C5FD", "#334155", "#94A3B8", "#E2E8F0"
+BG_COLOR = "#F4F7FB"
+CARD_BG = "#FFFFFF"
+ACCENT = "#93C5FD"
+TEXT_MAIN = "#334155"
+BORDER = "#E2E8F0"
 
 st.markdown(f"""
 <style>
@@ -18,7 +22,10 @@ st.markdown(f"""
   .header-box h1 {{ color: {TEXT_MAIN}; font-size: 1.6rem; font-weight: 700; margin: 0; }}
   .control-panel {{ background-color: {CARD_BG}; padding: 1.5rem; border-radius: 12px; border: 1px solid {BORDER}; max-width: 800px; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }}
   .verdict-card {{ background-color: {CARD_BG}; padding: 1.5rem; border-radius: 12px; border-left: 6px solid; margin-top: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }}
-  .verdict-card.warn {{ border-color: #FCD34D; }} .verdict-card.ok {{ border-color: #86EFAC; }} .verdict-card.neutral {{ border-color: #CBD5E1; }} .verdict-card.miss {{ border-color: #FCA5A5; }}
+  .verdict-card.warn {{ border-color: #FCD34D; }}
+  .verdict-card.ok {{ border-color: #86EFAC; }}
+  .verdict-card.neutral {{ border-color: #CBD5E1; }}
+  .verdict-card.miss {{ border-color: #FCA5A5; }}
   .pastel-table-wrapper {{ overflow-x: auto; margin-top: 1rem; border-radius: 8px; border: 1px solid {BORDER}; }}
   table.pastel-grid {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; background: {CARD_BG}; text-align: center; }}
   table.pastel-grid th {{ background: #E0E7FF; color: {TEXT_MAIN}; font-weight: 700; padding: 0.8rem; border-bottom: 2px solid #C7D2FE; font-size: 0.8rem; text-transform: uppercase; }}
@@ -28,7 +35,7 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="header-box"><h1>Registration Lookup &amp; Fee Verification</h1></div>', unsafe_allow_html=True)
+st.markdown('<div class="header-box"><h1>Registration Lookup and Fee Verification</h1></div>', unsafe_allow_html=True)
 
 
 def get_ist_sync_key():
@@ -70,7 +77,7 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 def mask_mobile(val):
     if pd.isna(val) or not str(val).strip():
-        return "—"
+        return "-"
     s = str(val).strip()
     if len(s) == 32 and re.fullmatch(r"[a-fA-F0-9]{32}", s):
         return "[Secured Hash]"
@@ -81,12 +88,12 @@ def mask_mobile(val):
 
 
 def render_record_card(record):
-    program_val = record.get("_program_clean", "—")
+    program_val = record.get("_program_clean", "-")
     fee_val = record.get("_fee_clean", None)
     verdict = rules.evaluate(program_val, fee_val)
-    fee_display = f"₹ {fee_val:,.2f}" if pd.notna(fee_val) else "—"
+    fee_display = f"Rs {fee_val:,.2f}" if pd.notna(fee_val) else "-"
 
-    phones = {col: mask_mobile(record.get(col, "—")) for col in PHONE_COLUMNS}
+    phones = {col: mask_mobile(record.get(col, "-")) for col in PHONE_COLUMNS}
 
     st.markdown(f"""
     <div class="verdict-card {verdict.tone}">
@@ -102,10 +109,10 @@ def render_record_card(record):
           </thead>
           <tbody>
             <tr>
-              <td><strong>{record.get('_regno_clean', '—')}</strong></td>
+              <td><strong>{record.get('_regno_clean', '-')}</strong></td>
               <td>{program_val}</td>
               <td>{fee_display}</td>
-              <td>{record.get('_date_clean', '—')}</td>
+              <td>{record.get('_date_clean', '-')}</td>
               <td>{phones.get('mobile_no')}</td><td>{phones.get('whatsapp_number')}</td>
               <td>{phones.get('father_mobile_no')}</td><td>{phones.get('mother_mobile_no')}</td><td>{phones.get('class_recorded_mobile_no')}</td>
             </tr>
@@ -117,4 +124,38 @@ def render_record_card(record):
 
 
 if search_query.strip():
-    if start_date >
+    if (end_date - start_date).days < 0:
+        st.error("Start Date cannot be after End Date.")
+        st.stop()
+
+    if search_type == "Registration Number":
+        results = search_by_regno(df, search_query)
+    else:
+        raw_phone = search_query.strip()
+        phone_hash = hashlib.md5(raw_phone.encode()).hexdigest()
+        st.caption(f"Generated Masked Number: `{phone_hash}`")
+        results = search_by_phone(df, phone_hash)
+
+    raw_hits = len(results)
+
+    if not results.empty:
+        d = results["_date_clean"]
+        in_range = d.isna() | ((d >= start_date) & (d <= end_date))
+        results = results[in_range]
+        if selected_programs:
+            results = results[results["_program_clean"].isin(selected_programs)]
+
+    with st.expander("Diagnostics (delete once fixed)"):
+        st.write("Rows loaded from sheet:", len(df))
+        st.write("Columns detected:", list(df.columns))
+        st.write("Earliest date in data:", str(valid_dates.min()) if not valid_dates.empty else "NONE")
+        st.write("Latest date in data:", str(valid_dates.max()) if not valid_dates.empty else "NONE")
+        st.write("Rows with unreadable dates:", int(df["_date_clean"].isna().sum()))
+        st.write("Matches BEFORE date/program filter:", raw_hits)
+        st.write("Matches AFTER date/program filter:", len(results))
+
+    if results.empty:
+        st.markdown('<div class="verdict-card miss"><h3>No results found</h3><p>Ensure the number is correct and falls within the selected 30-Day Date Range and Program.</p></div>', unsafe_allow_html=True)
+    else:
+        for _, row in results.iterrows():
+            render_record_card(row.to_dict())
