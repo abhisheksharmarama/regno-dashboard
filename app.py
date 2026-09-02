@@ -5,6 +5,7 @@ import re
 import pandas as pd
 import streamlit as st
 import rules
+# TYPO FIXED HERE
 from data_sources import sync_sqlite_db, search_regno, search_phone, get_unique_programs, PHONE_COLS
 
 st.set_page_config(
@@ -47,14 +48,12 @@ st.markdown(f"""
 st.markdown('<div class="header-box"><h1>Registration Lookup & Fee Verification Dashboard</h1></div>', unsafe_allow_html=True)
 
 def get_ist_sync_key():
-    """Forces sync at exactly 11:00 AM IST."""
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.datetime.now(ist)
     if now.hour < 11:
         return (now - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
     return now.strftime('%Y-%m-%d')
 
-# Run background sync to Hard Drive DB
 with st.spinner("Synchronizing database... (Happens once daily after 11:00 AM IST)"):
     try:
         sync_sqlite_db(get_ist_sync_key())
@@ -64,7 +63,6 @@ with st.spinner("Synchronizing database... (Happens once daily after 11:00 AM IS
 
 st.markdown('<div class="control-panel">', unsafe_allow_html=True)
 
-# Split Date Range Selection
 c1, c2, c3 = st.columns([1, 1, 2])
 ist = pytz.timezone('Asia/Kolkata')
 today = datetime.datetime.now(ist).date()
@@ -101,21 +99,20 @@ def mask_mobile(val):
     return s
 
 def render_record_card(row_dict):
-    # Locate core columns
     prog_col = next((c for c in ["all_program", "program", "program_name", "course"] if c in row_dict), None)
     fee_col = next((c for c in ["fees_paid", "fee_paid", "fees", "fee"] if c in row_dict), None)
     
     program_val = row_dict.get(prog_col, "—") if prog_col else "—"
     raw_fee = row_dict.get(fee_col, None) if fee_col else None
     
-    # Calculate Verdict dynamically on the 1 row
     verdict = rules.evaluate(program_val, raw_fee)
     
     fee_display = f"₹ {rules.parse_fee(raw_fee):,.2f}" if pd.notna(raw_fee) and rules.parse_fee(raw_fee) is not None else "—"
     date_display = row_dict.get("_date_clean", "—")
     reg_display = row_dict.get("_regno_clean", "—")
 
-    phones = {col: mask_mobile(row_dict.get(col, "—")) for col in PHONE_COLUMNS}
+    # TYPO FIXED HERE
+    phones = {col: mask_mobile(row_dict.get(col, "—")) for col in PHONE_COLS}
 
     st.markdown(f"""
     <div class="verdict-card {verdict.tone}">
@@ -154,7 +151,6 @@ def render_record_card(row_dict):
     </div>
     """, unsafe_allow_html=True)
 
-# Search Execution
 if search_query.strip():
     if start_date > end_date:
         st.error("Start Date cannot be after End Date.")
@@ -171,14 +167,11 @@ if search_query.strip():
         st.caption(f"🔒 **Generated Masked Number:** `{phone_hash}`")
         results_df = search_phone(phone_hash)
 
-    # Filter results in memory (costs 0 RAM since it's only 1-5 rows)
     if not results_df.empty:
-        # Date Filter
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
         results_df = results_df[(results_df["_date_clean"] >= start_str) & (results_df["_date_clean"] <= end_str)]
         
-        # Program Filter
         if selected_programs:
             prog_col = next((c for c in ["all_program", "program", "program_name", "course"] if c in results_df.columns), None)
             if prog_col:
