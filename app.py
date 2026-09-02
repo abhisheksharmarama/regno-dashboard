@@ -5,7 +5,7 @@ import streamlit as st
 import rules
 from data_sources import load_live_data, lookup_record
 
-# 1. UI Configuration
+# 1. UI Configuration (Rendered Instantly)
 st.set_page_config(
     page_title="Registration Lookup",
     layout="centered", 
@@ -13,12 +13,12 @@ st.set_page_config(
 )
 
 # Pastel Color Palette
-BG_COLOR = "#F4F7FB"       # Soft pastel background
-CARD_BG = "#FFFFFF"        # Clean white for cards
-ACCENT = "#93C5FD"         # Pastel Blue accent
-TEXT_MAIN = "#334155"      # Slate 700 for readable text
-TEXT_MUTED = "#94A3B8"     # Slate 400 for labels
-BORDER = "#E2E8F0"         # Soft border
+BG_COLOR = "#F4F7FB"       
+CARD_BG = "#FFFFFF"        
+ACCENT = "#93C5FD"         
+TEXT_MAIN = "#334155"      
+TEXT_MUTED = "#94A3B8"     
+BORDER = "#E2E8F0"         
 
 st.markdown(f"""
 <style>
@@ -57,11 +57,10 @@ st.markdown(f"""
       box-shadow: 0 4px 6px rgba(0, 0, 0, 0.02);
       margin-top: 1.5rem;
   }}
-  /* Pastel Status Colors */
-  .verdict-card.warn {{ border-color: #FCD34D; }} /* Pastel Yellow/Orange */
-  .verdict-card.ok {{ border-color: #86EFAC; }}   /* Pastel Green */
-  .verdict-card.neutral {{ border-color: #CBD5E1; }} /* Pastel Gray */
-  .verdict-card.miss {{ border-color: #FCA5A5; }}  /* Pastel Red */
+  .verdict-card.warn {{ border-color: #FCD34D; }} 
+  .verdict-card.ok {{ border-color: #86EFAC; }}   
+  .verdict-card.neutral {{ border-color: #CBD5E1; }} 
+  .verdict-card.miss {{ border-color: #FCA5A5; }}  
   
   .verdict-card h3 {{ margin-top: 0; font-size: 1.25rem; color: {TEXT_MAIN}; }}
   .verdict-card p {{ color: #64748B; font-size: 0.95rem; margin-bottom: 1.5rem; }}
@@ -94,54 +93,64 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# 2. Daily 1 AM IST Cache Logic
+# 2. Render Header (Prevents Blank Screen)
+st.markdown('<div class="header-box"><h1>Registration Lookup & Fee Verification Dashboard</h1></div>', unsafe_allow_html=True)
+
+# 3. Daily 1 AM IST Cache Logic
 def get_ist_sync_key():
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.datetime.now(ist)
-    # If it is currently before 1 AM, we use yesterday's date as the key.
-    # The moment it strikes 1 AM, the key changes to today's date, forcing a fresh data pull.
     if now.hour < 1:
         return (now - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
     return now.strftime('%Y-%m-%d')
 
-try:
-    df = load_live_data(get_ist_sync_key())
-except Exception as exc:
-    st.error(f"System Offline: Unable to sync with database. ({exc})")
-    st.stop()
+# 4. Load Data with UI Feedback
+with st.spinner("Syncing database... (This takes a few seconds but only occurs once a day after 1 AM)"):
+    try:
+        df = load_live_data(get_ist_sync_key())
+    except Exception as exc:
+        st.error(f"System Offline: Unable to sync with database. ({exc})")
+        st.stop()
 
-# 3. Main Interface
-st.markdown('<div class="header-box"><h1>Registration Lookup & Fee Verification Dashboard</h1></div>', unsafe_allow_html=True)
-
+# 5. Main Interface (Rendered after data loads)
 st.markdown('<div class="control-panel">', unsafe_allow_html=True)
 
-# Top Filters
-c1, c2 = st.columns(2)
+c1, c2, c3 = st.columns([1, 1, 2])
 with c1:
     valid_dates = df["_date_clean"].dropna()
     if not valid_dates.empty:
         min_date, max_date = valid_dates.min(), valid_dates.max()
-        date_selection = st.date_input("Date Range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+        start_date = st.date_input("Start Date", value=min_date, min_value=min_date, max_value=max_date)
     else:
-        date_selection = ()
-        st.info("No dates available")
+        start_date = None
+        st.info("No dates")
 
 with c2:
+    if not valid_dates.empty:
+        end_date = st.date_input("End Date", value=max_date, min_value=min_date, max_value=max_date)
+    else:
+        end_date = None
+        st.info("No dates")
+
+with c3:
     programs = sorted(df["_program_clean"].dropna().unique())
     selected_programs = st.multiselect("Program Name", options=programs, placeholder="Filter by program...")
 
 st.markdown("<hr style='margin: 1.2rem 0; border: none; border-top: 1px solid #E2E8F0;'>", unsafe_allow_html=True)
 
-# Primary Search
 search_query = st.text_input("Reg number check", placeholder="Enter registration number...")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# 4. Search Execution
+# 6. Search Execution
 if search_query.strip():
-    # Apply slicers to the dataset before searching
     filtered_df = df.copy()
-    if len(date_selection) == 2:
-        filtered_df = filtered_df[(filtered_df["_date_clean"] >= date_selection[0]) & (filtered_df["_date_clean"] <= date_selection[1])]
+    
+    if start_date and end_date:
+        if start_date > end_date:
+            st.error("Start Date cannot be after End Date.")
+            st.stop()
+        filtered_df = filtered_df[(filtered_df["_date_clean"] >= start_date) & (filtered_df["_date_clean"] <= end_date)]
+        
     if selected_programs:
         filtered_df = filtered_df[filtered_df["_program_clean"].isin(selected_programs)]
         
