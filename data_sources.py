@@ -19,13 +19,12 @@ def load_live_data(sync_key: str) -> pd.DataFrame:
     if not url:
         raise ValueError("CSV URL missing.")
 
-    # THE FIX: Added on_bad_lines='skip' to bypass stray commas in user data
+    # High-speed C-engine with bad line skipping to prevent tokenizing errors
     df = pd.read_csv(
         url, 
         dtype=str, 
         keep_default_na=False, 
-        on_bad_lines='skip',
-        engine='python' # Uses the more forgiving Python parser
+        on_bad_lines='skip'
     )
     
     df.columns = [str(c).strip().casefold() for c in df.columns]
