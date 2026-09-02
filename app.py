@@ -68,8 +68,7 @@ st.markdown('</div>', unsafe_allow_html=True)
 def mask_mobile(val):
     if pd.isna(val) or not str(val).strip(): return "—"
     s = str(val).strip()
-    # Support for both legacy MD5 (32 chars) and new SHA-256 (64 chars) from the ERP
-    if (len(s) == 32 or len(s) == 64) and re.fullmatch(r"[a-fA-F0-9]{32,64}", s): return "[Secured Hash]"
+    if len(s) == 32 and re.fullmatch(r"[a-fA-F0-9]{32}", s): return "[Secured Hash]"
     cleaned = re.sub(r"\D", "", s)
     if len(cleaned) >= 10: return cleaned[:2] + "xxxx" + cleaned[-4:]
     return s
@@ -118,8 +117,8 @@ if search_query.strip():
         results = search_by_regno(df, search_query)
     else:
         raw_phone = search_query.strip()
-        # Engine upgraded to SHA-256 to match upstream ERP changes
-        phone_hash = hashlib.sha256(raw_phone.encode()).hexdigest()
+        # Strictly enforced MD5 (32-character) hashing
+        phone_hash = hashlib.md5(raw_phone.encode()).hexdigest()
         st.caption(f"🔒 **Generated Masked Number:** `{phone_hash}`")
         results = search_by_phone(df, phone_hash)
 
