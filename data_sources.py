@@ -24,8 +24,9 @@ def find_column(df: pd.DataFrame, aliases: list[str]) -> str | None:
             return lowered[alias]
     return None
 
-@st.cache_data(ttl=300, show_spinner="Syncing live with Google Sheets...")
-def load_live_data() -> pd.DataFrame:
+# Notice the 'sync_key' parameter. When this changes at 1 AM IST, the cache resets.
+@st.cache_data(show_spinner="Syncing live with Google Sheets...")
+def load_live_data(sync_key: str) -> pd.DataFrame:
     cfg = dict(st.secrets.get("sheet", {}))
     url = cfg.get("csv_url")
     if not url:
@@ -34,24 +35,20 @@ def load_live_data() -> pd.DataFrame:
     df = pd.read_csv(url, dtype=str, keep_default_na=False)
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Resolve core columns
     reg_col = find_column(df, REGNO_ALIASES) or df.columns[0]
     prog_col = find_column(df, PROGRAM_ALIASES)
     fee_col = find_column(df, FEE_ALIASES)
     date_col = find_column(df, DATE_ALIASES)
 
-    # Standard internal bindings
     df["_regno_clean"] = df[reg_col].map(clean_regno)
     df["_program_clean"] = df[prog_col] if prog_col else "Unknown"
     df["_fee_clean"] = df[fee_col].map(rules.parse_fee) if fee_col else 0.0
 
-    # Parse dates safely
     if date_col:
         df["_date_clean"] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True).dt.date
     else:
         df["_date_clean"] = pd.NaT
 
-    # Precalculate status verdicts
     df["_verdict_code"] = rules.evaluate_frame(df["_program_clean"], df[fee_col] if fee_col else pd.Series())
     df["_verdict_label"] = df["_verdict_code"].map(rules.LABELS)
 
