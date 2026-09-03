@@ -1,14 +1,19 @@
 import datetime
-import pytz
 import hashlib
 import re
+
 import pandas as pd
 import streamlit as st
+
 import rules
 
-st.set_page_config(page_title="Registration Lookup", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Registration Lookup", layout="wide",
+                   initial_sidebar_state="collapsed")
 
-PHONE_COLUMNS = ["mobile_no", "father_mobile_no", "mother_mobile_no", "class_recorded_mobile_no", "whatsapp_number"]
+PHONE_COLUMNS = ["mobile_no", "father_mobile_no", "mother_mobile_no",
+                 "class_recorded_mobile_no", "whatsapp_number"]
+
+ERROR_TOKENS = {"#ref!", "#n/a", "#error!", "#value!", "#name?", "loading..."}
 
 BG_COLOR = "#F4F7FB"
 CARD_BG = "#FFFFFF"
@@ -17,7 +22,7 @@ TEXT_MAIN = "#334155"
 BORDER = "#E2E8F0"
 
 
-def clean_regno(value) -> str:
+def clean_regno(value):
     if value is None:
         return ""
     text = str(value).strip()
@@ -25,17 +30,26 @@ def clean_regno(value) -> str:
     return re.sub(r"\D", "", text)
 
 
-@st.cache_data(show_spinner=False, max_entries=1)
-def load_live_data(sync_key: str) -> pd.DataFrame:
+@st.cache_resource(show_spinner=False, ttl=900)
+def load_live_data():
     cfg = dict(st.secrets.get("sheet", {}))
     url = cfg.get("csv_url")
     if not url:
-        raise ValueError("CSV URL missing in Secrets.")
+        raise ValueError("csv_url missing from Secrets.")
     if "pubhtml" in url:
-        raise ValueError("csv_url points to a web page (pubhtml). Use the /pub?...&output=csv link.")
+        raise ValueError("csv_url points to a web page. Republish as CSV and use the /pub?...&output=csv link.")
 
     df = pd.read_csv(url, dtype=str, keep_default_na=False)
     df.columns = [str(c).strip().casefold() for c in df.columns]
+
+    if len(df) == 0:
+        raise ValueError("The published sheet has no data rows. The IMPORTRANGE may still be loading.")
+
+    head = df.head(200).astype(str).apply(lambda s: s.str.strip().str.lower())
+    bad = int(head.isin(ERROR_TOKENS).sum().sum())
+    if head.size and bad / head.size > 0.30:
+        raise ValueError("The source sheet is returning formula errors (#REF! / Loading). "
+                         "Open the sheet, confirm the IMPORTRANGE has access and has finished loading, then hit Retry.")
 
     reg_col = next((c for c in ["regno", "reg_no", "registration no", "reg no"] if c in df.columns), None)
     prog_col = next((c for c in ["all_program", "program", "program_name", "course"] if c in df.columns), None)
@@ -45,16 +59,15 @@ def load_live_data(sync_key: str) -> pd.DataFrame:
     if reg_col is None:
         raise ValueError("regno column not found. Columns seen: " + str(list(df.columns)))
 
-    df["_regno_clean"] = df[reg_col].apply(clean_regno)
+    df["_regno_clean"] = df[reg_col].map(clean_regno)
     df["_program_clean"] = df[prog_col].astype(str).str.strip() if prog_col else "Unknown"
-    df["_fee_clean"] = df[fee_col].apply(rules.parse_fee) if fee_col else None
+    df["_fee_clean"] = df[fee_col].map(rules.parse_fee) if fee_col else None
 
     if date_col:
         raw = df[date_col].astype(str).str.strip()
         parsed = pd.to_datetime(raw, errors="coerce", format="%Y-%m-%d %H:%M:%S")
         if parsed.isna().any():
-            fallback = pd.to_datetime(raw, errors="coerce", format="mixed", dayfirst=False)
-            parsed = parsed.fillna(fallback)
+            parsed = parsed.fillna(pd.to_datetime(raw, errors="coerce", format="mixed", dayfirst=False))
         df["_date_clean"] = parsed.dt.date
     else:
         df["_date_clean"] = None
@@ -63,25 +76,36 @@ def load_live_data(sync_key: str) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().str.lower()
 
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+
+    phone_map = {}
+    for col in [c for c in PHONE_COLUMNS if c in df.columns]:
+        for pos, val in enumerate(df[col].to_numpy()):
+            if val and val != "nan":
+                phone_map.setdefault(val, set()).add(pos)
+
+    regno_map = {}
+    for pos, val in enumerate(df["_regno_clean"].to_numpy()):
+        if val:
+            regno_map.setdefault(val, []).append(pos)
+
+    loaded_at = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+    return df, phone_map, regno_map, loaded_at
 
 
-def search_by_regno(df, regno):
+def search_by_regno(df, regno_map, regno):
     key = clean_regno(regno)
-    if not key:
-        return pd.DataFrame()
-    return df[df["_regno_clean"] == key]
+    positions = regno_map.get(key)
+    if not positions:
+        return df.iloc[0:0]
+    return df.iloc[positions]
 
 
-def search_by_phone(df, phone_hash):
-    target = str(phone_hash).strip().lower()
-    valid_cols = [c for c in PHONE_COLUMNS if c in df.columns]
-    if not valid_cols:
-        return pd.DataFrame()
-    mask = pd.Series(False, index=df.index)
-    for col in valid_cols:
-        mask = mask | (df[col] == target)
-    return df[mask]
+def search_by_phone(df, phone_map, phone_hash):
+    positions = phone_map.get(str(phone_hash).strip().lower())
+    if not positions:
+        return df.iloc[0:0]
+    return df.iloc[sorted(positions)]
 
 
 def mask_mobile(val):
@@ -96,42 +120,38 @@ def mask_mobile(val):
     return s
 
 
-def get_ist_sync_key():
-    ist = pytz.timezone("Asia/Kolkata")
-    now = datetime.datetime.now(ist)
-    if now.hour < 11:
-        return (now - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-    return now.strftime("%Y-%m-%d")
-
-
-st.markdown(f"""
+st.markdown("""
 <style>
-  .stApp {{ background-color: {BG_COLOR}; color: {TEXT_MAIN}; font-family: 'Segoe UI', sans-serif; }}
-  .header-box {{ background-color: {CARD_BG}; padding: 1.5rem; border-radius: 12px; border-top: 6px solid {ACCENT}; text-align: center; margin-bottom: 2rem; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }}
-  .header-box h1 {{ color: {TEXT_MAIN}; font-size: 1.6rem; font-weight: 700; margin: 0; }}
-  .control-panel {{ background-color: {CARD_BG}; padding: 1.5rem; border-radius: 12px; border: 1px solid {BORDER}; max-width: 800px; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }}
-  .verdict-card {{ background-color: {CARD_BG}; padding: 1.5rem; border-radius: 12px; border-left: 6px solid; margin-top: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }}
-  .verdict-card.warn {{ border-color: #FCD34D; }}
-  .verdict-card.ok {{ border-color: #86EFAC; }}
-  .verdict-card.neutral {{ border-color: #CBD5E1; }}
-  .verdict-card.miss {{ border-color: #FCA5A5; }}
-  .pastel-table-wrapper {{ overflow-x: auto; margin-top: 1rem; border-radius: 8px; border: 1px solid {BORDER}; }}
-  table.pastel-grid {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; background: {CARD_BG}; text-align: center; }}
-  table.pastel-grid th {{ background: #E0E7FF; color: {TEXT_MAIN}; font-weight: 700; padding: 0.8rem; border-bottom: 2px solid #C7D2FE; font-size: 0.8rem; text-transform: uppercase; }}
-  table.pastel-grid td {{ padding: 0.8rem; border-bottom: 1px solid {BORDER}; border-right: 1px solid {BORDER}; white-space: nowrap; }}
-  table.pastel-grid td:last-child {{ border-right: none; }}
-  div[data-testid="stRadio"] > div {{ flex-direction: row; gap: 2rem; padding-bottom: 1rem; }}
+  .stApp { background-color: BGC; color: TXT; font-family: 'Segoe UI', sans-serif; }
+  .header-box { background-color: CRD; padding: 1.5rem; border-radius: 12px; border-top: 6px solid ACC; text-align: center; margin-bottom: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }
+  .header-box h1 { color: TXT; font-size: 1.6rem; font-weight: 700; margin: 0; }
+  .control-panel { background-color: CRD; padding: 1.5rem; border-radius: 12px; border: 1px solid BRD; max-width: 800px; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }
+  .verdict-card { background-color: CRD; padding: 1.5rem; border-radius: 12px; border-left: 6px solid; margin-top: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.02); }
+  .verdict-card.warn { border-color: #FCD34D; }
+  .verdict-card.ok { border-color: #86EFAC; }
+  .verdict-card.neutral { border-color: #CBD5E1; }
+  .verdict-card.miss { border-color: #FCA5A5; }
+  .pastel-table-wrapper { overflow-x: auto; margin-top: 1rem; border-radius: 8px; border: 1px solid BRD; }
+  table.pastel-grid { width: 100%; border-collapse: collapse; font-size: 0.9rem; background: CRD; text-align: center; }
+  table.pastel-grid th { background: #E0E7FF; color: TXT; font-weight: 700; padding: 0.8rem; border-bottom: 2px solid #C7D2FE; font-size: 0.8rem; text-transform: uppercase; }
+  table.pastel-grid td { padding: 0.8rem; border-bottom: 1px solid BRD; border-right: 1px solid BRD; white-space: nowrap; }
+  table.pastel-grid td:last-child { border-right: none; }
+  div[data-testid="stRadio"] > div { flex-direction: row; gap: 2rem; padding-bottom: 1rem; }
 </style>
-""", unsafe_allow_html=True)
+""".replace("BGC", BG_COLOR).replace("CRD", CARD_BG).replace("ACC", ACCENT)
+   .replace("TXT", TEXT_MAIN).replace("BRD", BORDER), unsafe_allow_html=True)
 
-st.markdown('<div class="header-box"><h1>Registration Lookup and Fee Verification</h1></div>', unsafe_allow_html=True)
+st.markdown('<div class="header-box"><h1>Registration Lookup and Fee Verification</h1></div>',
+            unsafe_allow_html=True)
 
-with st.spinner("Loading 30-Day Database..."):
-    try:
-        df = load_live_data(get_ist_sync_key())
-    except Exception as exc:
-        st.error("System Offline: " + str(exc))
-        st.stop()
+try:
+    df, phone_map, regno_map, loaded_at = load_live_data()
+except Exception as exc:
+    st.error("Data unavailable: " + str(exc))
+    if st.button("Retry"):
+        st.cache_resource.clear()
+        st.rerun()
+    st.stop()
 
 st.markdown('<div class="control-panel">', unsafe_allow_html=True)
 
@@ -145,14 +165,26 @@ with c2:
     end_date = st.date_input("End Date", value=default_end)
 
 programs = sorted(df["_program_clean"].dropna().astype(str).unique())
-selected_programs = st.multiselect("Program Name", options=programs, placeholder="Filter by program...")
+selected_programs = st.multiselect("Program Name", options=programs,
+                                   placeholder="Filter by program...")
 
-st.markdown("<hr style='margin: 1.2rem 0; border: none; border-top: 1px solid #E2E8F0;'>", unsafe_allow_html=True)
+st.markdown("<hr style='margin: 1.2rem 0; border: none; border-top: 1px solid #E2E8F0;'>",
+            unsafe_allow_html=True)
 
-search_type = st.radio("Search Method", ["Registration Number", "Mobile Number"], label_visibility="collapsed")
-search_query = st.text_input("Search", placeholder="Enter Reg No or 10-digit Mobile...", label_visibility="collapsed")
+search_type = st.radio("Search Method", ["Registration Number", "Mobile Number"],
+                       label_visibility="collapsed")
+search_query = st.text_input("Search", placeholder="Enter Reg No or 10-digit Mobile...",
+                             label_visibility="collapsed")
 
 st.markdown('</div>', unsafe_allow_html=True)
+
+foot1, foot2 = st.columns([4, 1])
+with foot1:
+    st.caption("{:,} records loaded. Last synced {} IST.".format(len(df), loaded_at.strftime("%d %b %Y, %I:%M %p")))
+with foot2:
+    if st.button("Refresh data"):
+        st.cache_resource.clear()
+        st.rerun()
 
 
 def render_record_card(record):
@@ -171,7 +203,8 @@ def render_record_card(record):
           <thead>
             <tr>
               <th>REG NO</th><th>PROGRAM</th><th>FEES PAID</th><th>DATE</th>
-              <th>mobile_no</th><th>whatsapp_number</th><th>father_mobile_no</th><th>mother_mobile_no</th><th>class_recorded</th>
+              <th>mobile_no</th><th>whatsapp_number</th><th>father_mobile_no</th>
+              <th>mother_mobile_no</th><th>class_recorded</th>
             </tr>
           </thead>
           <tbody>
@@ -209,32 +242,33 @@ if search_query.strip():
         st.stop()
 
     if search_type == "Registration Number":
-        results = search_by_regno(df, search_query)
+        results = search_by_regno(df, regno_map, search_query)
     else:
         phone_hash = hashlib.md5(search_query.strip().encode()).hexdigest()
         st.caption("Generated Masked Number: " + phone_hash)
-        results = search_by_phone(df, phone_hash)
+        results = search_by_phone(df, phone_map, phone_hash)
 
     raw_hits = len(results)
 
     if not results.empty:
         d = results["_date_clean"]
-        in_range = d.isna() | ((d >= start_date) & (d <= end_date))
-        results = results[in_range]
+        results = results[d.isna() | ((d >= start_date) & (d <= end_date))]
         if selected_programs:
             results = results[results["_program_clean"].isin(selected_programs)]
 
     with st.expander("Diagnostics"):
-        st.write("Rows loaded from sheet:", len(df))
+        st.write("Rows loaded:", len(df))
         st.write("Columns detected:", list(df.columns))
         st.write("Earliest date:", str(valid_dates.min()) if not valid_dates.empty else "NONE")
         st.write("Latest date:", str(valid_dates.max()) if not valid_dates.empty else "NONE")
         st.write("Rows with unreadable dates:", int(df["_date_clean"].isna().sum()))
-        st.write("Matches BEFORE filters:", raw_hits)
-        st.write("Matches AFTER filters:", len(results))
+        st.write("Matches before filters:", raw_hits)
+        st.write("Matches after filters:", len(results))
 
     if results.empty:
-        st.markdown('<div class="verdict-card miss"><h3>No results found</h3><p>Ensure the number is correct and falls within the selected date range and program.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="verdict-card miss"><h3>No results found</h3>'
+                    '<p>Check the number, the date range and the program filter.</p></div>',
+                    unsafe_allow_html=True)
     else:
         for _, row in results.iterrows():
             render_record_card(row.to_dict())
